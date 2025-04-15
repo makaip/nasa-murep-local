@@ -8,33 +8,43 @@ from typing import List, Optional
 
 class LatLonAttacher:
     """
-    Single Responsibility: Attaches interpolated lat/lon to a dataset using navigation data.
+    Attaches lat/lon coordinates to a dataset. Supports both full arrays and interpolated control points.
     """
-
     @staticmethod
     def attach(geo_ds: xr.Dataset, nav_ds: xr.Dataset) -> xr.Dataset:
-        lat_ctl = nav_ds['latitude'].data
-        lon_ctl = nav_ds['longitude'].data
-        cols = nav_ds['cntl_pt_cols'].data
+        if {'latitude', 'longitude'} <= set(nav_ds.variables):
+            lat = nav_ds['latitude'].data
+            lon = nav_ds['longitude'].data
 
-        n_lines = geo_ds.sizes['number_of_lines']
-        n_pixels = geo_ds.sizes['pixels_per_line']
+            geo_ds = geo_ds.assign_coords(
+                lat=(('number_of_lines', 'pixels_per_line'), lat),
+                lon=(('number_of_lines', 'pixels_per_line'), lon)
+            )
+            return geo_ds
+        elif 'cntl_pt_cols' in nav_ds.variables:
+            lat_ctl = nav_ds['latitude'].data
+            lon_ctl = nav_ds['longitude'].data
+            cols = nav_ds['cntl_pt_cols'].data
 
-        lat_full = np.empty((n_lines, n_pixels), dtype=np.float32)
-        lon_full = np.empty((n_lines, n_pixels), dtype=np.float32)
+            n_lines = geo_ds.sizes['number_of_lines']
+            n_pixels = geo_ds.sizes['pixels_per_line']
 
-        for i in range(n_lines):
-            f_lat = interp1d(cols, lat_ctl[i, :], bounds_error=False, fill_value="extrapolate")
-            f_lon = interp1d(cols, lon_ctl[i, :], bounds_error=False, fill_value="extrapolate")
-            lat_full[i, :] = f_lat(np.arange(n_pixels))
-            lon_full[i, :] = f_lon(np.arange(n_pixels))
+            lat_full = np.empty((n_lines, n_pixels), dtype=np.float32)
+            lon_full = np.empty((n_lines, n_pixels), dtype=np.float32)
 
-        geo_ds = geo_ds.assign_coords(
-            lat=(('number_of_lines', 'pixels_per_line'), lat_full),
-            lon=(('number_of_lines', 'pixels_per_line'), lon_full)
-        )
-        return geo_ds
+            for i in range(n_lines):
+                f_lat = interp1d(cols, lat_ctl[i, :], bounds_error=False, fill_value="extrapolate")
+                f_lon = interp1d(cols, lon_ctl[i, :], bounds_error=False, fill_value="extrapolate")
+                lat_full[i, :] = f_lat(np.arange(n_pixels))
+                lon_full[i, :] = f_lon(np.arange(n_pixels))
 
+            geo_ds = geo_ds.assign_coords(
+                lat=(('number_of_lines', 'pixels_per_line'), lat_full),
+                lon=(('number_of_lines', 'pixels_per_line'), lon_full)
+            )
+            return geo_ds
+        else:
+            raise ValueError("No usable latitude/longitude information found in navigation_data.")
 
 class L2DatasetLoader:
     """
