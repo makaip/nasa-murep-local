@@ -3,7 +3,7 @@
 import xarray as xr
 import numpy as np
 from scipy.interpolate import interp1d
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 class LatLonAttacher:
@@ -68,3 +68,76 @@ class L2DatasetLoader:
 
     def load_multiple(self, file_paths: List[str]) -> List[xr.Dataset]:
         return [ds for ds in (self.load_dataset(path) for path in file_paths) if ds is not None]
+
+class GPUDataExtractor:
+    def extract(self, datasets: List[xr.Dataset]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        import cupy as cp
+        import numpy as np
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _extract(ds):
+            # Convert variables to CuPy arrays and flatten
+            var = cp.asarray(ds['chlor_a'].values).flatten()
+            lat = cp.asarray(ds['lat'].values).flatten()
+            lon = cp.asarray(ds['lon'].values).flatten()
+            # Mask NaN values on the GPU
+            mask = ~cp.isnan(var) & ~cp.isnan(lat) & ~cp.isnan(lon)
+            return cp.asnumpy(lon[mask]), cp.asnumpy(lat[mask]), cp.asnumpy(var[mask])
+
+        with ThreadPoolExecutor() as executor:
+            results = list(executor.map(_extract, datasets))
+
+        all_lon = np.concatenate([r[0] for r in results])
+        all_lat = np.concatenate([r[1] for r in results])
+        all_var = np.concatenate([r[2] for r in results])
+
+        return all_lon, all_lat, all_var
+
+class SelectiveInterpolator:
+    """
+    Encapsulates selective interpolation of small NaN regions in 2D gridded datasets.
+    """
+    @staticmethod
+    def interpolate(binned_data, lat_edges, lon_edges, threshold=32):
+        """
+        Interpolate small NaN regions in the provided 2D data.
+        
+        Parameters:
+            binned_data : 2D numpy array
+                Data that contains NaN values.
+            lat_edges : 1D numpy array
+                Latitude bin edges.
+            lon_edges : 1D numpy array
+                Longitude bin edges.
+            threshold : int, optional
+                Only regions with fewer than this number of connected bins are interpolated.
+        
+        Returns:
+            2D numpy array with small NaN regions filled.
+        """
+        from scipy import ndimage
+        from scipy.interpolate import griddata
+        import numpy as np
+        
+        # Create a mask for NaN values
+        nan_mask = np.isnan(binned_data)
+        s = ndimage.generate_binary_structure(2, 1)  # 4-connectivity
+        labeled_array, num_features = ndimage.label(nan_mask, structure=s)
+        region_sizes = np.bincount(labeled_array.flatten())[1:]
+        small_regions_mask = np.zeros_like(labeled_array, dtype=bool)
+        for i, size in enumerate(region_sizes, start=1):
+            if size < threshold:
+                small_regions_mask |= (labeled_array == i)
+        interpolated_data = binned_data.copy()
+        known_y, known_x = np.where(~nan_mask)
+        known_values = binned_data[known_y, known_x]
+        interp_y, interp_x = np.where(small_regions_mask)
+        if len(interp_y) > 0:
+            interp_values = griddata(
+                (known_y, known_x),
+                known_values,
+                (interp_y, interp_x),
+                method='linear'
+            )
+            interpolated_data[interp_y, interp_x] = interp_values
+        return interpolated_data
