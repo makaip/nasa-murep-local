@@ -3,7 +3,7 @@
 import xarray as xr
 import numpy as np
 from scipy.interpolate import interp1d
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 
 class LatLonAttacher:
@@ -51,8 +51,11 @@ class L2DatasetLoader:
     Single Responsibility: Loads and prepares Level-2 datasets.
     """
 
-    def __init__(self, variable: str = 'chlor_a'):
-        self.variable = variable
+    def __init__(self, variables: List[str]):
+        # Store the list of variables to load
+        if not isinstance(variables, list):
+            raise TypeError("variables must be a list of strings.")
+        self.variables = variables
 
     def load_dataset(self, file_path: str) -> Optional[xr.Dataset]:
         try:
@@ -60,7 +63,15 @@ class L2DatasetLoader:
             nav_ds = xr.open_dataset(file_path, group='navigation_data')
 
             geo_ds = LatLonAttacher.attach(geo_ds, nav_ds)
-            return geo_ds[[self.variable, 'lat', 'lon']]
+            # Select latitude, longitude, and all specified variables
+            required_vars = ['lat', 'lon'] + self.variables
+            # Check if all required variables exist
+            missing_vars = [v for v in self.variables if v not in geo_ds]
+            if missing_vars:
+                print(f"Warning: Skipping {file_path}. Missing variables: {', '.join(missing_vars)}")
+                return None
+
+            return geo_ds[required_vars]
 
         except Exception as e:
             print(f"Skipping {file_path} due to error: {e}")
@@ -70,28 +81,58 @@ class L2DatasetLoader:
         return [ds for ds in (self.load_dataset(path) for path in file_paths) if ds is not None]
 
 class GPUDataExtractor:
-    def extract(self, datasets: List[xr.Dataset]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Extracts data from datasets using GPU acceleration for multiple variables.
+    """
+    def __init__(self, variables: List[str]):
+        if not isinstance(variables, list):
+            raise TypeError("variables must be a list of strings.")
+        self.variables = variables
+
+    def extract(self, datasets: List[xr.Dataset]) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
         import cupy as cp
         import numpy as np
         from concurrent.futures import ThreadPoolExecutor
 
         def _extract(ds):
-            # Convert variables to CuPy arrays and flatten
-            var = cp.asarray(ds['chlor_a'].values).flatten()
-            lat = cp.asarray(ds['lat'].values).flatten()
-            lon = cp.asarray(ds['lon'].values).flatten()
-            # Mask NaN values on the GPU
-            mask = ~cp.isnan(var) & ~cp.isnan(lat) & ~cp.isnan(lon)
-            return cp.asnumpy(lon[mask]), cp.asnumpy(lat[mask]), cp.asnumpy(var[mask])
+            # Convert core coords to CuPy arrays
+            lat_cp = cp.asarray(ds['lat'].values)
+            lon_cp = cp.asarray(ds['lon'].values)
+
+            # Base mask for NaNs in lat/lon
+            base_mask = ~cp.isnan(lat_cp) & ~cp.isnan(lon_cp)
+
+            # Load all variable data
+            vars_data_cp = {var: cp.asarray(ds[var].values) for var in self.variables}
+
+            # Combine masks: NaN in lat OR lon OR any variable
+            combined_mask = base_mask
+            for var in self.variables:
+                combined_mask &= ~cp.isnan(vars_data_cp[var])
+
+            # Flatten and apply the combined mask
+            final_lon = cp.asnumpy(lon_cp[combined_mask].flatten())
+            final_lat = cp.asnumpy(lat_cp[combined_mask].flatten())
+            final_vars = {
+                var: cp.asnumpy(vars_data_cp[var][combined_mask].flatten())
+                for var in self.variables
+            }
+
+            return final_lon, final_lat, final_vars
 
         with ThreadPoolExecutor() as executor:
             results = list(executor.map(_extract, datasets))
 
+        # Concatenate results from all datasets
         all_lon = np.concatenate([r[0] for r in results])
         all_lat = np.concatenate([r[1] for r in results])
-        all_var = np.concatenate([r[2] for r in results])
 
-        return all_lon, all_lat, all_var
+        # Concatenate variable data
+        all_vars_dict = {}
+        for var in self.variables:
+            all_vars_dict[var] = np.concatenate([r[2][var] for r in results])
+
+        return all_lon, all_lat, all_vars_dict
 
 class SelectiveInterpolator:
     """
