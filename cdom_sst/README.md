@@ -27,3 +27,32 @@ This directory contains tools and notebooks for downloading, organizing, and tes
 - **Data Organization**: Downloaded files are systematically organized into directories named by region and time period, making it easy to locate and process data for specific analyses.
 
 - **Testing and Validation**: The test notebooks provide a framework for verifying the integrity and usefulness of the data, as well as for initial scientific exploration.
+
+
+## Using the L2 and L3 Pipelines
+
+The `l2_pipeline.py` and `l3_pipeline.py` modules provide classes for loading, extracting, and processing satellite datasets:
+
+- **L2 Pipeline**: Use `L2DatasetLoader` to load Level-2 datasets (e.g., MODISA L2, MODIS L2P) with support for variable selection, bounding box subsetting, and navigation data attachment. The `GPUDataExtractor` class enables fast extraction of variables using GPU acceleration. The `SelectiveInterpolator` class can fill small NaN regions in gridded data.
+
+- **L3 Pipeline**: Use `L3DatasetLoader` to load Level-3/4 datasets (e.g., MUR L4 SST) with variable selection and optional spatial subsetting. The `GPUDataExtractor` and `SelectiveInterpolator` classes work similarly to those in the L2 pipeline, enabling efficient extraction and interpolation.
+
+**Basic usage:**
+
+1. Instantiate a loader (`L2DatasetLoader` or `L3DatasetLoader`) with a list of variables and optional bounding box.
+2. Load one or more datasets using `load_dataset` or `load_multiple`.
+3. Use `GPUDataExtractor` to extract lat/lon and variable arrays for further analysis or visualization.
+4. Optionally, use `SelectiveInterpolator.interpolate` to fill small gaps in gridded data.
+
+Refer to the test notebooks for practical examples of these pipelines in action.
+
+## Pipeline Flowcharts
+
+Below are flowcharts illustrating the main steps of the L2 and L3 pipelines:
+
+### L3 Pipeline Overview
+![L3 Pipeline Flowchart](L3_pipeline.png)
+
+### L2 Pipeline Overview
+![L2 Pipeline Flowchart](L2_pipeline.png)
+
