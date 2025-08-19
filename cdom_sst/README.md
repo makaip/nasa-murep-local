@@ -51,8 +51,8 @@ Refer to the test notebooks for practical examples of these pipelines in action.
 Below are flowcharts illustrating the main steps of the L2 and L3 pipelines:
 
 ### L3 Pipeline Overview
-![L3 Pipeline Flowchart](L3_pipeline.png)
+![L3 Pipeline Flowchart](pipelines/L3_pipeline.png)
 
 ### L2 Pipeline Overview
-![L2 Pipeline Flowchart](L2_pipeline.png)
+![L2 Pipeline Flowchart](pipelines/L2_pipeline.png)
 
