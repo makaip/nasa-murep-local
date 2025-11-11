@@ -141,8 +141,8 @@ def main():
     lat_bins = 200
     lon_bins = 300
     
-    sst_base_pattern = r"E:\satdata\MUR-JPL-L4-GLOB-v4.1_Texas Louisiana Shelf_{year}-06-01_{year}-11-30"
-    chlor_base_pattern = r"E:\satdata\Texas Louisiana Shelf_{year}-06-01_{year}-11-30"
+    sst_base_pattern = r"E:\satdata\MUR-JPL-L4-GLOB-v4.1_Texas Louisiana Shelf_{year}-01-01_{year}-12-31"
+    chlor_base_pattern = r"E:\satdata\Texas Louisiana Shelf_{year}-01-01_{year}-12-31"
     output_dir = r"E:\satdata\Custom"
     
     sst_var = 'analysed_sst'
@@ -151,7 +151,7 @@ def main():
     
     # DBSCAN parameters (matches notebook)
     min_samples = 4
-    years = [2010, 2011]  # June-November 2010 and 2011 (matches notebook)
+    years = [2005, 2011]  # June-November 2010 and 2011 (matches notebook)
 
     print(f"\nConfiguration:")
     print(f"  Region: [{lon_min}, {lat_min}] to [{lon_max}, {lat_max}]")
@@ -431,7 +431,7 @@ def main():
         'calinski_harabasz_score': calinski
     }
     
-    output_file = os.path.join(output_dir, 'dbscan_model_optimal_2005_2011.pkl')
+    output_file = os.path.join(output_dir, 'dbscan_model_optimal_2005_2011_full.pkl')
     with open(output_file, 'wb') as f:
         pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
     

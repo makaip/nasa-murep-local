@@ -1,11 +1,8 @@
 r"""
-K-Means Clustering Training Script (2005-2011) with Total Normalization
-=======================================================================
+K-Means Clustering Training Script (2010-2011) with Weekly Normalization
+=========================================================================
 Trains K-means clustering model on MUR L4 SST and MODIS L2 chlorophyll data
-from 2005 to 2011 for the Texas-Louisiana Shelf.
-
-This version uses TOTAL normalization for SST, finding the min/max across
-the entire dataset and normalizing all data points against that single range.
+from 2010 to 2011 (June-November periods) for the Texas-Louisiana Shelf.
 
 Saves trained model and grid information to E:\satdata\Custom
 """
@@ -23,7 +20,7 @@ import pickle
 import sys
 import time
 from tqdm import tqdm
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Add parent directory to path for pipeline imports
 sys.dont_write_bytecode = True
@@ -38,73 +35,123 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
-def normalize_sst_total(sst_datasets, sst_var):
+def extract_date_from_filename(filename):
+    """Extract date from MUR SST filename."""
+    basename = os.path.basename(filename)
+    # Filename format: YYYYMMDDHHMMSS-...
+    try:
+        date_str = basename.split('-')[0][:8]
+        return datetime.strptime(date_str, '%Y%m%d')
+    except:
+        return None
+
+
+def group_files_by_week(files):
+    """Group files by week, returning dict of week_number -> file_list."""
+    weeks = {}
+    
+    for f in files:
+        date = extract_date_from_filename(f)
+        if date is None:
+            continue
+        
+        # Get week number (ISO week)
+        week_key = date.strftime('%Y-W%W')
+        
+        if week_key not in weeks:
+            weeks[week_key] = []
+        weeks[week_key].append(f)
+    
+    return weeks
+
+
+def normalize_sst_weekly(sst_datasets, sst_var):
     """
-    Normalize SST data using the total min/max from the entire dataset.
+    Normalize SST data week-by-week using each week's high/low temperatures.
     Returns list of normalized SST arrays and overall stats.
     """
-    print("  Normalizing SST data (total dataset normalization)...")
+    print("  Normalizing SST data weekly...")
     
-    all_sst_values = []
-    
-    # First pass: collect all data and find total min/max
-    print("    First pass: Collecting all SST data...")
-    for ds in tqdm(sst_datasets, desc="    Reading SST", unit="file"):
+    # Group datasets by week
+    weeks = {}
+    failed_count = 0
+    for ds in sst_datasets:
+        # Extract date from time coordinate
         try:
+            time_val = ds['time'].values
+            if hasattr(time_val, '__iter__'):
+                time_val = time_val[0]
+            date = pd.Timestamp(time_val).to_pydatetime()
+            week_key = date.strftime('%Y-W%W')
+            
+            if week_key not in weeks:
+                weeks[week_key] = []
+            weeks[week_key].append(ds)
+        except Exception as e:
+            failed_count += 1
+            if failed_count <= 3:  # Print first few errors
+                print(f"    WARNING: Failed to parse date from dataset: {e}")
+            continue
+    
+    print(f"    Found {len(weeks)} weeks of data")
+    
+    # Process each week
+    normalized_sst_list = []
+    week_stats = []
+    
+    for week_key in sorted(weeks.keys()):
+        week_datasets = weeks[week_key]
+        
+        # Collect all SST values for this week
+        week_sst_values = []
+        for ds in week_datasets:
             sst_kelvin = ds[sst_var].values.squeeze()
             sst_celsius = sst_kelvin - 273.15
             # Basic QC
             sst_celsius[(sst_celsius < -2) | (sst_celsius > 35)] = np.nan
-            all_sst_values.append(sst_celsius)
-        except Exception as e:
-            print(f"    WARNING: Failed to process dataset: {e}")
-            continue
-            
-    if not all_sst_values:
-        raise ValueError("No SST data was successfully read.")
-
-    print("    Calculating total min/max...")
-    # Concatenate all data to find true min/max
-    full_sst_data = np.concatenate([s.ravel() for s in all_sst_values])
-    
-    total_min = np.nanmin(full_sst_data)
-    total_max = np.nanmax(full_sst_data)
-    total_range = total_max - total_min
-    
-    if total_range == 0:
-        total_range = 1.0  # Avoid division by zero
+            week_sst_values.append(sst_celsius)
         
-    total_stats = {
-        'min': total_min,
-        'max': total_max,
-        'range': total_range,
-        'n_files': len(all_sst_values)
-    }
+        # Calculate week's min and max
+        week_sst_concat = np.concatenate([s.ravel() for s in week_sst_values])
+        week_min = np.nanmin(week_sst_concat)
+        week_max = np.nanmax(week_sst_concat)
+        week_range = week_max - week_min
+        
+        if week_range == 0:
+            week_range = 1.0  # Avoid division by zero
+        
+        week_stats.append({
+            'week': week_key,
+            'min': week_min,
+            'max': week_max,
+            'range': week_range,
+            'n_files': len(week_datasets)
+        })
+        
+        # Normalize this week's data
+        for sst_celsius in week_sst_values:
+            sst_normalized = (sst_celsius - week_min) / week_range
+            normalized_sst_list.append(sst_normalized)
     
-    print(f"\n    Total SST normalization statistics:")
-    print(f"      Range: [{total_stats['min']:.2f}, {total_stats['max']:.2f}]°C")
-    print(f"      Spread: {total_stats['range']:.2f}°C")
-    print(f"      Files: {total_stats['n_files']}")
-
-    # Second pass: normalize using total min/max
-    print("\n    Second pass: Normalizing data...")
-    normalized_sst_list = []
-    for sst_celsius in tqdm(all_sst_values, desc="    Normalizing", unit="array"):
-        sst_normalized = (sst_celsius - total_min) / total_range
-        normalized_sst_list.append(sst_normalized)
+    # Print statistics
+    print(f"\n    Weekly SST normalization statistics:")
+    for stats in week_stats[:5]:  # Show first 5 weeks
+        print(f"      {stats['week']}: [{stats['min']:.2f}, {stats['max']:.2f}]°C "
+              f"(range: {stats['range']:.2f}°C, {stats['n_files']} files)")
+    if len(week_stats) > 5:
+        print(f"      ... and {len(week_stats) - 5} more weeks")
     
     if not normalized_sst_list:
-        raise ValueError("No SST data was successfully normalized.")
+        raise ValueError(f"No SST data was successfully processed. Failed to parse dates from {failed_count} datasets.")
     
-    # Return list of stats to match original function's signature
-    return normalized_sst_list, [total_stats]
+    return normalized_sst_list, week_stats
 
 
 def main():
     script_start = time.time()
     
     print("=" * 80)
-    print("K-MEANS CLUSTERING TRAINING (2005-2011) - TOTAL NORMALIZATION")
+    print("K-MEANS CLUSTERING TRAINING (2010-2011) - WEEKLY NORMALIZATION")
     print("=" * 80)
     
     # Configuration
@@ -125,14 +172,14 @@ def main():
     random_state = 42
     max_iter = 300
     n_init = 10
-    years = list(range(2005, 2012))  # 2005-2011
+    years = list(range(2005, 2012))  # 2005-2011, not inclusive ending
 
     print(f"\nConfiguration:")
     print(f"  Region: [{lon_min}, {lat_min}] to [{lon_max}, {lat_max}]")
     print(f"  Grid: {lat_bins} x {lon_bins}")
     print(f"  Years: {years[0]}-{years[-1]}")
     print(f"  K-means clusters: {n_clusters}")
-    print(f"  Normalization: Total (by dataset's high/low)")
+    print(f"  Normalization: Weekly (by week's high/low)")
     
     # Find and load SST files
     print("\n" + "=" * 80)
@@ -167,10 +214,9 @@ def main():
     lat_sst = sst_datasets[0]['lat'].values
     lon_sst = sst_datasets[0]['lon'].values
     
-    # Process SST with total normalization
-    print("  Processing SST data with total normalization...")
-    # Replaced weekly function with total function
-    sst_list, total_stats = normalize_sst_total(sst_datasets, sst_var)
+    # Process SST with weekly normalization
+    print("  Processing SST data with weekly normalization...")
+    sst_list, week_stats = normalize_sst_weekly(sst_datasets, sst_var)
     
     if not sst_list:
         raise ValueError(f"No SST data was successfully processed from {len(sst_datasets)} loaded datasets")
@@ -246,18 +292,14 @@ def main():
     
     print(f"  Chlorophyll points in region: {len(chlor_clipped)}")
     
-    # Apply log transform to chlorophyll data *before* gridding
-    # This helps normalize the highly skewed distribution
-    chlor_clipped_log = np.log10(chlor_clipped)
-    
     chlor_binned, lat_edges, lon_edges, _ = binned_statistic_2d(
-        lat_clipped, lon_clipped, chlor_clipped_log,  # Use log-transformed data
+        lat_clipped, lon_clipped, chlor_clipped,
         statistic='mean',
         bins=[lat_bins, lon_bins],
         range=[[lat_min, lat_max], [lon_min, lon_max]]
     )
     
-    print(f"  Valid (log) chlorophyll pixels: {np.sum(~np.isnan(chlor_binned))}")
+    print(f"  Valid chlorophyll pixels: {np.sum(~np.isnan(chlor_binned))}")
     
     # Resample SST to chlorophyll grid
     print("  Resampling SST to common grid...")
@@ -288,22 +330,20 @@ def main():
     
     valid_mask = ~np.isnan(sst_regridded) & ~np.isnan(chlor_binned)
     n_valid = np.sum(valid_mask)
-    print(f"  Pixels with both SST and (log) chlorophyll: {n_valid}")
+    print(f"  Pixels with both SST and chlorophyll: {n_valid}")
     
     sst_valid = sst_regridded[valid_mask]
-    chlor_valid_log = chlor_binned[valid_mask] # This is log-transformed
+    chlor_valid = chlor_binned[valid_mask]
     
-    # Stack the features: (Normalized SST, Log-Transformed Chlorophyll)
-    features = np.column_stack([sst_valid, chlor_valid_log])
+    # Use normalized SST and chlorophyll (no log transformation)
+    features = np.column_stack([sst_valid, chlor_valid])
     
-    # We still scale the final features to [0, 1] for K-means
-    # This puts SST (already ~0-1) and log-chlorophyll on the same footing
     scaler = MinMaxScaler()
     features_scaled = scaler.fit_transform(features)
     
     print(f"  Feature matrix shape: {features_scaled.shape}")
-    print(f"  Feature 1 (SST Scaled): min={features_scaled[:, 0].min():.4f}, max={features_scaled[:, 0].max():.4f}, mean={features_scaled[:, 0].mean():.4f}")
-    print(f"  Feature 2 (LogChlor Scaled): min={features_scaled[:, 1].min():.4f}, max={features_scaled[:, 1].max():.4f}, mean={features_scaled[:, 1].mean():.4f}")
+    print(f"  Feature 1 (SST MinMax): min={features_scaled[:, 0].min():.4f}, max={features_scaled[:, 0].max():.4f}, mean={features_scaled[:, 0].mean():.4f}")
+    print(f"  Feature 2 (Chlor MinMax): min={features_scaled[:, 1].min():.4f}, max={features_scaled[:, 1].max():.4f}, mean={features_scaled[:, 1].mean():.4f}")
     
     # Train K-Means
     print("\n" + "=" * 80)
@@ -331,31 +371,15 @@ def main():
     print(f"  ⏱ Training completed in {t_train_elapsed:.2f}s")
     
     # Print cluster statistics
-    # We need to un-scale and un-log to show interpretable values
-    
-    # Inverse transform the scaled features to get back:
-    # [NormSST, LogChlor]
-    features_unscaled = scaler.inverse_transform(features_scaled)
-    sst_norm_unscaled = features_unscaled[:, 0]
-    chlor_log_unscaled = features_unscaled[:, 1]
-    
-    # Un-normalize SST (using total_stats)
-    sst_unnormalized = (sst_norm_unscaled * total_stats[0]['range']) + total_stats[0]['min']
-    
-    # Un-log chlorophyll
-    chlor_unlogged = np.power(10, chlor_log_unscaled)
-
-    print("\n  Cluster characteristics (in original units):")
+    print("\n  Cluster characteristics:")
     for label in range(n_clusters):
         mask = labels == label
         n_pixels = mask.sum()
-        
-        sst_cluster = sst_unnormalized[mask]
-        chlor_cluster = chlor_unlogged[mask]
-        
+        sst_cluster = sst_valid[mask]
+        chlor_cluster = chlor_valid[mask]
         print(f"    Cluster {label}: {n_pixels} pixels ({100*n_pixels/len(labels):.1f}%) | "
-              f"SST={sst_cluster.mean():.2f}±{sst_cluster.std():.2f}°C | "
-              f"Chlor={chlor_cluster.mean():.2f}±{chlor_cluster.std():.2f} mg/m³")
+              f"SST(norm)={sst_cluster.mean():.4f}±{sst_cluster.std():.4f} | "
+              f"Chlor={chlor_cluster.mean():.4f}±{chlor_cluster.std():.4f} mg/m³")
     
     # Save results
     print("\n" + "=" * 80)
@@ -379,15 +403,15 @@ def main():
         'training_years': years,
         'sst_interpolator': sst_interpolator,
         'training_labels': labels,
-        'training_sst_norm': sst_valid,         # Normalized SST
-        'training_chlor_log': chlor_valid_log,  # Log-transformed Chlorophyll
-        'cluster_centers_scaled': kmeans.cluster_centers_,
+        'training_sst': sst_valid,
+        'training_chlor': chlor_valid,
+        'cluster_centers': kmeans.cluster_centers_,
         'inertia': kmeans.inertia_,
-        'total_sst_stats': total_stats[0], # Use the single stats dict
-        'normalization': 'total'
+        'weekly_stats': week_stats,
+        'normalization': 'weekly'
     }
     
-    output_file = os.path.join(output_dir, f'kmeans_model_{years[0]}_{years[-1]}_total.pkl')
+    output_file = os.path.join(output_dir, 'kmeans_model_2010_2011_weekly_full.pkl')
     with open(output_file, 'wb') as f:
         pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
     
@@ -413,8 +437,8 @@ def main():
     print("\n  Model Summary:")
     print(f"    Algorithm: K-means")
     print(f"    Clusters: {n_clusters}")
-    print(f"    Normalization: Total (by dataset's high/low SST)")
-    print(f"    Features: Scaled(Normalized SST, Log10(Chlorophyll))")
+    print(f"    Normalization: Weekly (by week's high/low SST)")
+    print(f"    Features: Normalized SST + log10(Chlorophyll)")
     print("=" * 80)
 
 
