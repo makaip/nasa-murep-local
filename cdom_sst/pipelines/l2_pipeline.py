@@ -190,7 +190,7 @@ class GPUDataExtractor:
                 combined_mask &= ~cp.isnan(vars_data_cp[var_name])
             
             final_lon_np = cp.asnumpy(lon_cp_2d[combined_mask].flatten())
-            final_lat_np = cp.asnumpy(lat_cp_2d[combined_mask].flatten())
+            final_lat_np = cp.asnumpy(lat_cp_2d[combined_mask].flatten()) 
             final_vars_np = {
                 var_name: cp.asnumpy(vars_data_cp[var_name][combined_mask].flatten())
                 for var_name in self.variables

@@ -269,17 +269,19 @@ def process_chlorophyll_data(year: int, lat_edges: np.ndarray, lon_edges: np.nda
     # Initialize GPU extractor
     extractor = GPUDataExtractor(variables=[CHLOR_VAR])
     
-    results = []
+    # Dictionary to accumulate data by date
+    daily_data = {}
     
-    # Process in batches to manage memory
-    batch_size = 50
-    total_batches = (len(nc_files) + batch_size - 1) // batch_size
-    for batch_start in tqdm(range(0, len(nc_files), batch_size), desc=f"  Chlor {year}", unit="batch", total=total_batches):
-        batch_files = nc_files[batch_start:batch_start + batch_size]
-        
+    # Process each file individually
+    for file_path in tqdm(nc_files, desc=f"  Chlor {year}", unit="file"):
         try:
-            # Load batch
-            datasets = loader.load_multiple(batch_files)
+            # Extract date from filename
+            file_date = extract_date_from_filepath(file_path)
+            if not file_date:
+                continue
+            
+            # Load single file
+            datasets = loader.load_multiple([file_path])
             
             if not datasets:
                 continue
@@ -308,32 +310,33 @@ def process_chlorophyll_data(year: int, lat_edges: np.ndarray, lon_edges: np.nda
             if len(chlor_valid) == 0:
                 continue
             
-            # For L2 data, we need to aggregate by day since multiple files per day
-            # Extract dates from all files in batch
-            file_dates = []
-            for f in batch_files:
-                date = extract_date_from_filepath(f)
-                if date:
-                    file_dates.append(date)
+            # Accumulate data for this date
+            if file_date not in daily_data:
+                daily_data[file_date] = {'lat': [], 'lon': [], 'chlor': []}
             
-            # Use the most common date in batch (or first date)
-            if file_dates:
-                batch_date = max(set(file_dates), key=file_dates.count)
-            else:
-                continue
-            
-            # Bin to grid
-            binned_chlor = bin_data_to_grid(lon_valid, lat_valid, chlor_valid, lat_edges, lon_edges)
-            
-            results.append({
-                'date': batch_date,
-                'chlorophyll': binned_chlor,
-                'n_points': len(chlor_valid)
-            })
+            daily_data[file_date]['lat'].extend(lat_valid.tolist())
+            daily_data[file_date]['lon'].extend(lon_valid.tolist())
+            daily_data[file_date]['chlor'].extend(chlor_valid.tolist())
             
         except Exception as e:
-            tqdm.write(f"  Error processing batch starting at index {batch_start}: {e}")
+            tqdm.write(f"  Error processing {file_path}: {e}")
             continue
+    
+    # Bin accumulated daily data to grid
+    results = []
+    for date, data in daily_data.items():
+        if len(data['chlor']) > 0:
+            lat_arr = np.array(data['lat'])
+            lon_arr = np.array(data['lon'])
+            chlor_arr = np.array(data['chlor'])
+            
+            binned_chlor = bin_data_to_grid(lon_arr, lat_arr, chlor_arr, lat_edges, lon_edges)
+            
+            results.append({
+                'date': date,
+                'chlorophyll': binned_chlor,
+                'n_points': len(chlor_arr)
+            })
     
     print(f"  Successfully processed {len(results)} chlorophyll records for {year}")
     return results
@@ -363,17 +366,19 @@ def process_cdom_data(year: int, lat_edges: np.ndarray, lon_edges: np.ndarray) -
     # Initialize GPU extractor
     extractor = GPUDataExtractor(variables=[RRS_412_VAR, RRS_555_VAR])
     
-    results = []
+    # Dictionary to accumulate data by date
+    daily_data = {}
     
-    # Process in batches
-    batch_size = 50
-    total_batches = (len(nc_files) + batch_size - 1) // batch_size
-    for batch_start in tqdm(range(0, len(nc_files), batch_size), desc=f"  CDOM {year}", unit="batch", total=total_batches):
-        batch_files = nc_files[batch_start:batch_start + batch_size]
-        
+    # Process each file individually
+    for file_path in tqdm(nc_files, desc=f"  CDOM {year}", unit="file"):
         try:
-            # Load batch
-            datasets = loader.load_multiple(batch_files)
+            # Extract date from filename
+            file_date = extract_date_from_filepath(file_path)
+            if not file_date:
+                continue
+            
+            # Load single file
+            datasets = loader.load_multiple([file_path])
             
             if not datasets:
                 continue
@@ -406,30 +411,33 @@ def process_cdom_data(year: int, lat_edges: np.ndarray, lon_edges: np.ndarray) -
             if len(cdom_valid) == 0:
                 continue
             
-            # Extract dates from batch
-            file_dates = []
-            for f in batch_files:
-                date = extract_date_from_filepath(f)
-                if date:
-                    file_dates.append(date)
+            # Accumulate data for this date
+            if file_date not in daily_data:
+                daily_data[file_date] = {'lat': [], 'lon': [], 'cdom': []}
             
-            if file_dates:
-                batch_date = max(set(file_dates), key=file_dates.count)
-            else:
-                continue
-            
-            # Bin to grid
-            binned_cdom = bin_data_to_grid(lon_valid, lat_valid, cdom_valid, lat_edges, lon_edges)
-            
-            results.append({
-                'date': batch_date,
-                'cdom': binned_cdom,
-                'n_points': len(cdom_valid)
-            })
+            daily_data[file_date]['lat'].extend(lat_valid.tolist())
+            daily_data[file_date]['lon'].extend(lon_valid.tolist())
+            daily_data[file_date]['cdom'].extend(cdom_valid.tolist())
             
         except Exception as e:
-            tqdm.write(f"  Error processing batch starting at index {batch_start}: {e}")
+            tqdm.write(f"  Error processing {file_path}: {e}")
             continue
+    
+    # Bin accumulated daily data to grid
+    results = []
+    for date, data in daily_data.items():
+        if len(data['cdom']) > 0:
+            lat_arr = np.array(data['lat'])
+            lon_arr = np.array(data['lon'])
+            cdom_arr = np.array(data['cdom'])
+            
+            binned_cdom = bin_data_to_grid(lon_arr, lat_arr, cdom_arr, lat_edges, lon_edges)
+            
+            results.append({
+                'date': date,
+                'cdom': binned_cdom,
+                'n_points': len(cdom_arr)
+            })
     
     print(f"  Successfully processed {len(results)} CDOM records for {year}")
     return results
