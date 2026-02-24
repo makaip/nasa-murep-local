@@ -2,7 +2,7 @@
 Multi-Variable Satellite Data Pickler
 ======================================
 This script processes and combines SST (MUR L4), Chlorophyll (MODIS L2), 
-and CDOM (MODIS L2) data from 2005-2011 into a single pickle file.
+CDOM (MODIS L2), and SSL (Sea Surface Level/Height) data into a single pickle file.
 
 Data is binned to a common spatial grid, temporally aligned, and saved
 as a pandas DataFrame for easy manipulation and plotting.
@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from scipy.stats import binned_statistic_2d
+from scipy.ndimage import gaussian_filter
+from scipy.interpolate import RegularGridInterpolator
 from datetime import datetime, timedelta
 import pickle
 import sys
@@ -40,31 +42,35 @@ from pipelines.l3_pipeline import L3DatasetLoader, GPUDataExtractor as L3GPUData
 # CONFIGURATION
 # =====================================================================
 
-# Geographical Bounding Box - Texas Louisiana Shelf
-LON_MIN, LON_MAX = -94.0, -88.0
-LAT_MIN, LAT_MAX = 27.5, 30.5
+
+# Geographical Bounding Box - Yucatan Peninsula (updated to match notebook)
+LON_MIN, LON_MAX = -92.20216, -85.61256
+LAT_MIN, LAT_MAX = 19.57871, 22.86906
 
 # Binning parameters (consistent spatial grid for all variables)
-LAT_BINS = 200
-LON_BINS = 300
+LAT_BINS = 250
+LON_BINS = 250
 
-# Time range
-START_YEAR = 2005
-END_YEAR = 2011
+
+# Time range (updated to match notebook)
+START_YEAR = 2019
+END_YEAR = 2019
 
 # Data directories (patterns with {year} placeholder)
-MUR_SST_PATTERN = r"E:\satdata\MUR-JPL-L4-GLOB-v4.1_Texas Louisiana Shelf_{year}-01-01_{year}-12-31"
-MODIS_OC_PATTERN = r"E:\satdata\Texas Louisiana Shelf_{year}-01-01_{year}-12-31"
+MUR_SST_PATTERN = r"E:\satdata\MUR-JPL-L4-GLOB-v4.1_Yucatan Peninsula_{year}-01-01_{year}-12-31"
+MODIS_OC_PATTERN = r"E:\satdata\Yucatan Peninsula_{year}-01-01_{year}-12-31"
+SSL_PATTERN = r"E:\satdata\GCOOS_Yucatan Peninsula_2010-01-01_2019-12-31"
 
 # Output directory
 OUTPUT_DIR = r"E:\satdata\Custom"
-OUTPUT_FILENAME = "combined_sst_chlor_cdom_2005-2011.pkl"
+OUTPUT_FILENAME = "yucatan_sst_chlor_cdom_ssl_2019.pkl"
 
 # Variable names
 SST_VAR = 'analysed_sst'
 CHLOR_VAR = 'chlor_a'
 RRS_412_VAR = 'Rrs_412'
 RRS_555_VAR = 'Rrs_555'
+SSL_VAR = 'adt'  # Absolute Dynamic Topography (Sea Surface Level)
 
 # CDOM calculation constants
 CDOM_B0 = 0.2487
@@ -78,6 +84,14 @@ MIN_CHLOR = 0.01
 MAX_CHLOR = 100.0
 MIN_CDOM = 0.0
 MAX_CDOM = 1.0
+MIN_SSL = -2.0  # meters
+MAX_SSL = 2.0   # meters
+
+# SSL native resolution (AVISO/Copernicus altimetry is 0.25°)
+# Bicubic interpolation is used instead of Gaussian fill, so no manual sigma is needed.
+# A minimal native-grid Gaussian fill (sigma=1.5) only patches sparse QC-induced NaNs
+# before interpolating, without blurring the actual signal.
+SSL_NATIVE_RES_DEG = 0.25  # degrees – informational, used for logging
 
 # =====================================================================
 # HELPER FUNCTIONS
@@ -134,6 +148,27 @@ def bin_data_to_grid(lon: np.ndarray, lat: np.ndarray, values: np.ndarray,
         range=[[LAT_MIN, LAT_MAX], [LON_MIN, LON_MAX]]
     )
     return binned_data
+
+
+def gaussian_fill_nans(data: np.ndarray, sigma: float) -> np.ndarray:
+    """Fill NaN gaps in a 2-D array using a NaN-aware Gaussian blur.
+
+    Each output pixel is the Gaussian-weighted average of all *valid*
+    (non-NaN) neighbours, so no NaN values bleed into the result.  Pixels
+    that have no valid neighbours within the effective kernel radius remain
+    NaN.
+    """
+    filled = np.where(np.isnan(data), 0.0, data)
+    weights = np.where(np.isnan(data), 0.0, 1.0)
+
+    blurred_data = gaussian_filter(filled, sigma=sigma)
+    blurred_weights = gaussian_filter(weights, sigma=sigma)
+
+    # Avoid division by zero; leave truly empty regions as NaN
+    with np.errstate(invalid='ignore', divide='ignore'):
+        result = np.where(blurred_weights > 0, blurred_data / blurred_weights, np.nan)
+
+    return result
 
 
 def calculate_cdom(rrs_412: np.ndarray, rrs_555: np.ndarray) -> np.ndarray:
@@ -443,6 +478,161 @@ def process_cdom_data(year: int, lat_edges: np.ndarray, lon_edges: np.ndarray) -
     return results
 
 
+def process_ssl_data(year: int, lat_edges: np.ndarray, lon_edges: np.ndarray) -> List[Dict]:
+    """Process SSL (Sea Surface Level/Height) data for a given year."""
+    print(f"\n{'='*60}")
+    print(f"Processing SSL data for {year}...")
+    print(f"{'='*60}")
+    
+    # SSL data is organized as {year}.nc in the base directory
+    file_path = os.path.join(SSL_PATTERN, f"{year}.nc")
+    
+    if not os.path.exists(file_path):
+        print(f"  Warning: No SSL file found at {file_path}")
+        return []
+    
+    print(f"  Found SSL file: {os.path.basename(file_path)}")
+    
+    results = []
+    
+    try:
+        # Open the dataset
+        ds = xr.open_dataset(file_path)
+        print(f"  Dataset opened. Coords: {list(ds.coords)}, Vars: {list(ds.data_vars)}")
+        
+        # Standardization: Rename latitude/longitude to lat/lon if necessary
+        rename_dict = {}
+        if 'latitude' in ds.coords:
+            rename_dict['latitude'] = 'lat'
+        if 'longitude' in ds.coords:
+            rename_dict['longitude'] = 'lon'
+        
+        if rename_dict:
+            ds = ds.rename(rename_dict)
+        
+        # Check if SSL variable exists
+        if SSL_VAR not in ds:
+            print(f"  Warning: Variable '{SSL_VAR}' not found in {file_path}")
+            return []
+        
+        # Get time dimension
+        if 'time' not in ds.dims:
+            print(f"  Warning: No time dimension found in {file_path}")
+            return []
+        
+        n_times = len(ds['time'])
+        print(f"  Processing {n_times} time steps...")
+
+        # ── Build target grid from bin edges (computed once, reused every step) ──
+        lat_centers_tgt = lat_edges[:-1] + np.diff(lat_edges) / 2
+        lon_centers_tgt = lon_edges[:-1] + np.diff(lon_edges) / 2
+        lat_bin_size = np.mean(np.diff(lat_edges))  # °/bin
+        lon_bin_size = np.mean(np.diff(lon_edges))  # °/bin
+
+        # Optimal sigma for the native-grid NaN-patch pass:
+        # Cover ½ of one native SSL cell on the native grid (most datasets are 0.25°).
+        # At native resolution each bin IS one cell, so sigma ≈ 0.5 is a very gentle
+        # fill that only bridges isolated missing pixels without blurring real signal.
+        NATIVE_PATCH_SIGMA = 0.5
+
+        print(f"  SSL → target scale: "
+              f"{SSL_NATIVE_RES_DEG / lat_bin_size:.1f}× (lat), "
+              f"{SSL_NATIVE_RES_DEG / lon_bin_size:.1f}× (lon); "
+              f"using bicubic interpolation")
+
+        lon_grid_tgt, lat_grid_tgt = np.meshgrid(lon_centers_tgt, lat_centers_tgt)
+        query_points = np.column_stack([lat_grid_tgt.ravel(), lon_grid_tgt.ravel()])
+
+        # Get native lat/lon once (same for every time step)
+        lat_native = ds['lat'].values.copy()
+        lon_native = ds['lon'].values.copy()
+
+        # Ensure strictly ascending order for RegularGridInterpolator
+        lat_flip = lat_native[0] > lat_native[-1]
+        lon_flip = lon_native[0] > lon_native[-1]
+        if lat_flip:
+            lat_native = lat_native[::-1]
+        if lon_flip:
+            lon_native = lon_native[::-1]
+
+        # Process each time step
+        for t_idx in tqdm(range(n_times), desc=f"  SSL {year}", unit="time"):
+            try:
+                # Extract time
+                time_val = ds['time'].isel(time=t_idx).values
+                file_date = pd.Timestamp(time_val).to_pydatetime()
+                
+                # Extract SSL data for this time step
+                ssl_data = ds[SSL_VAR].isel(time=t_idx).values
+
+                # Mirror any axis flips applied to coordinates
+                if lat_flip:
+                    ssl_data = ssl_data[::-1, :]
+                if lon_flip:
+                    ssl_data = ssl_data[:, ::-1]
+                
+                # Apply quality control
+                ssl_data = np.where(
+                    (ssl_data >= MIN_SSL) & (ssl_data <= MAX_SSL),
+                    ssl_data,
+                    np.nan
+                )
+
+                n_valid = int(np.sum(~np.isnan(ssl_data)))
+                if n_valid == 0:
+                    continue
+
+                # Minimal NaN-aware Gaussian fill on the *native* grid to patch any
+                # isolated QC-masked pixels before interpolating.  sigma=0.5 is
+                # sub-pixel on the native grid so it does not blur real structure.
+                ssl_data = gaussian_fill_nans(ssl_data, sigma=NATIVE_PATCH_SIGMA)
+
+
+                # Use interpolation based on nearest neighbor for NaNs - much faster using
+                # scipy.ndimage.distance_transform_edt than NearestNDInterpolator
+                valid_mask = ~np.isnan(ssl_data)
+                
+                if not np.all(valid_mask):
+                    from scipy.ndimage import distance_transform_edt
+                    # Indicies of nearest valid pixel
+                    indices = distance_transform_edt(np.isnan(ssl_data), return_distances=False, return_indices=True)
+                    ssl_data_for_spline = ssl_data[tuple(indices)]
+                else:
+                    ssl_data_for_spline = ssl_data
+
+                interp = RegularGridInterpolator(
+                    (lat_native, lon_native), ssl_data_for_spline,
+                    method='cubic',
+                    bounds_error=False,
+                    fill_value=np.nan
+                )
+                ssl_interp = interp(query_points).reshape(
+                    len(lat_centers_tgt), len(lon_centers_tgt)
+                )
+
+                results.append({
+                    'date': file_date,
+                    'ssl': ssl_interp,
+                    'n_points': n_valid
+                })
+                    
+            except Exception as e:
+                tqdm.write(f"  Error processing time step {t_idx}: {e}")
+                continue
+        
+        # Close dataset
+        ds.close()
+        
+    except Exception as e:
+        import traceback
+        print(f"  Error processing {file_path}: {e}")
+        traceback.print_exc()
+        return []
+    
+    print(f"  Successfully processed {len(results)} SSL records for {year}")
+    return results
+
+
 # =====================================================================
 # MAIN PROCESSING PIPELINE
 # =====================================================================
@@ -481,6 +671,9 @@ def main():
         # Process CDOM
         cdom_results = process_cdom_data(year, lat_edges, lon_edges)
         
+        # Process SSL
+        ssl_results = process_ssl_data(year, lat_edges, lon_edges)
+        
         # Combine results for this year
         # Create a dictionary indexed by date
         year_data = {}
@@ -507,7 +700,14 @@ def main():
             if date not in year_data:
                 year_data[date] = {}
             year_data[date]['cdom'] = record['cdom']
-            year_data[date]['cdom_n_points'] = record['n_points']
+        
+        # Add SSL data
+        for record in ssl_results:
+            date = record['date']
+            if date not in year_data:
+                year_data[date] = {}
+            year_data[date]['ssl'] = record['ssl']
+            year_data[date]['ssl_n_points'] = record['n_points']
         
         # Convert to list of records
         for date, data in year_data.items():
@@ -539,9 +739,12 @@ def main():
     print(f"  Date range: {df.index.min()} to {df.index.max()}")
     print(f"  Columns: {list(df.columns)}")
     print(f"\nData availability:")
-    print(f"  SST: {df['sst'].notna().sum()} days")
-    print(f"  Chlorophyll: {df['chlorophyll'].notna().sum()} days")
-    print(f"  CDOM: {df['cdom'].notna().sum()} days")
+    for col, label in [('sst', 'SST'), ('chlorophyll', 'Chlorophyll'),
+                       ('cdom', 'CDOM'), ('ssl', 'SSL')]:
+        if col in df.columns:
+            print(f"  {label}: {df[col].notna().sum()} days")
+        else:
+            print(f"  {label}: 0 days (no data collected)")
     
     # Add grid coordinates to the pickle
     metadata = {
