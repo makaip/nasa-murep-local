@@ -53,17 +53,17 @@ LON_BINS = 250
 
 
 # Time range (updated to match notebook)
-START_YEAR = 2019
+START_YEAR = 2005
 END_YEAR = 2019
 
 # Data directories (patterns with {year} placeholder)
-MUR_SST_PATTERN = r"E:\satdata\MUR-JPL-L4-GLOB-v4.1_Yucatan Peninsula_{year}-01-01_{year}-12-31"
-MODIS_OC_PATTERN = r"E:\satdata\Yucatan Peninsula_{year}-01-01_{year}-12-31"
+MUR_SST_PATTERN = r"E:\satdata\sst\MUR-JPL-L4-GLOB-v4.1_Yucatan Peninsula_{year}-01-01_{year}-12-31"
+MODIS_OC_PATTERN = r"G:\satdata\cdom\Yucatan Peninsula_{year}-01-01_{year}-12-31"
 SSL_PATTERN = r"E:\satdata\GCOOS_Yucatan Peninsula_2010-01-01_2019-12-31"
 
 # Output directory
 OUTPUT_DIR = r"E:\satdata\Custom"
-OUTPUT_FILENAME = "yucatan_sst_chlor_cdom_ssl_2019.pkl"
+OUTPUT_FILENAME = "yucatan_sst_chlor_cdom_ssl_2005-2019_v2.pkl"
 
 # Variable names
 SST_VAR = 'analysed_sst'
