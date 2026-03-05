@@ -5,3 +5,6 @@
 /figures/
 __pycache__
 cdom_sst/experiments/hurricane_testing/output/
+videos_7d/
+videos_14d/
+videos/
