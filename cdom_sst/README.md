@@ -55,4 +55,3 @@ Below are flowcharts illustrating the main steps of the L2 and L3 pipelines:
 
 ### L2 Pipeline Overview
 ![L2 Pipeline Flowchart](pipelines/L2_pipeline.png)
-
